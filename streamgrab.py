@@ -1,137 +1,125 @@
-"""
-async_mjpeg_ringbuffer.py
-
-Usage:
-    python3 async_mjpeg_ringbuffer.py
-
-Dependencies:
-    pip install opencv-python
-ffmpeg must be installed on the system path.
-
-What it does:
-    - Runs ffmpeg to read HLS -> outputs MJPEG frames to stdout.
-    - Async reader extracts JPEG frames and writes them into a small ring buffer (max_frames).
-    - Main loop reads the latest frame from buffer and runs OpenCV processing/display.
-    - Press ESC to exit.
-"""
-
-import asyncio
 import cv2
+import subprocess
 import numpy as np
 import time
 
-# ---- CONFIG ----
-FFMPEG_CMD = [
-    "ffmpeg",
-    "-user_agent", "Mozilla/5.0",
-    "-headers", "Referer: https://players.media.verkeerscentrum.be/\r\nOrigin: https://players.media.verkeerscentrum.be\r\n",
-    "-i", "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8",
-    "-vf", "scale=1280:720",
-    "-f", "mjpeg",
-    "-q:v", "5",
-    "-"
-]
-WIDTH = 1280
-HEIGHT = 720
-MAX_FRAMES = 8                # ring buffer depth (tune 2-8)
-DISPLAY_FPS = 24              # desired display rate
-READ_CHUNK = 4096
+# Stream configuration
+M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8"
+REFERER = "https://players.media.verkeerscentrum.be/"
+ORIGIN = "https://players.media.verkeerscentrum.be"
 
-# ---- Ring buffer (holds latest frames only) ----
-class RingBuffer:
-    def __init__(self, maxsize):
-        self.maxsize = maxsize
-        self.buffer = [None] * maxsize
-        self.index = 0
-        self.count = 0
-        self.lock = asyncio.Lock()
+# Frame dimensions (adjust based on your stream)
+WIDTH = 854
+HEIGHT = 480
 
-    async def push(self, frame):
-        async with self.lock:
-            self.buffer[self.index] = frame
-            self.index = (self.index + 1) % self.maxsize
-            self.count = min(self.count + 1, self.maxsize)
-
-    async def get_latest(self):
-        async with self.lock:
-            if self.count == 0:
-                return None
-            # latest is index-1
-            idx = (self.index - 1) % self.maxsize
-            return self.buffer[idx]
-
-async def ffmpeg_reader(proc, ring):
-    """Asynchronously read stdout, extract MJPEG frames and push to ring buffer."""
-    buf = bytearray()
-    while True:
-        chunk = await proc.stdout.read(READ_CHUNK)
-        if not chunk:
-            break
-        buf.extend(chunk)
-        # find JPEG markers
-        while True:
-            start = buf.find(b'\xff\xd8')
-            end = buf.find(b'\xff\xd9', start + 2) if start != -1 else -1
-            if start != -1 and end != -1:
-                jpg = bytes(buf[start:end+2])
-                del buf[:end+2]
-                # decode
-                arr = np.frombuffer(jpg, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is None:
-                    continue
-                # push latest
-                await ring.push(frame)
-            else:
-                break
-
-async def run():
-    ring = RingBuffer(MAX_FRAMES)
-    # start ffmpeg
-    proc = await asyncio.create_subprocess_exec(
-        *FFMPEG_CMD,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
+def create_ffmpeg_process():
+    """Create ffmpeg process with proper headers and real-time settings"""
+    
+    # Headers string for ffmpeg
+    headers = f"Referer: {REFERER}\r\nOrigin: {ORIGIN}\r\n"
+    
+    # FFmpeg command optimized for low-latency streaming
+    command = [
+        'ffmpeg',
+        '-headers', headers,
+        '-fflags', 'nobuffer',              # Disable buffering
+        '-flags', 'low_delay',              # Low delay mode
+        '-strict', 'experimental',
+        '-analyzeduration', '0',            # Don't analyze stream
+        '-probesize', '32',                 # Minimal probe size
+        '-i', M3U8_URL,
+        '-vsync', '0',                      # Passthrough timestamps (prevents frame duplication)
+        '-copytb', '0',                     # Don't copy input stream time base
+        '-r', '25',                         # Force output to 25 fps (typical EU camera rate)
+        '-vf', f'scale={WIDTH}:{HEIGHT}',   # Scale to target resolution
+        '-f', 'rawvideo',                   # Raw video output
+        '-pix_fmt', 'bgr24',                # OpenCV compatible format
+        '-an',                              # No audio
+        '-sn',                              # No subtitles
+        '-'                                 # Output to pipe
+    ]
+    
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=10**8  # Large buffer for pipe
     )
+    
+    return process
 
-    reader_task = asyncio.create_task(ffmpeg_reader(proc, ring))
+def get_frame_size(process, width=WIDTH, height=HEIGHT):
+    """Calculate bytes per frame"""
+    return width * height * 3  # 3 bytes per pixel for BGR
 
-    # main display/process loop
-    frame_interval = 1.0 / DISPLAY_FPS
+def main():
+    print("Starting m3u8 stream...")
+    print(f"Stream URL: {M3U8_URL}")
+    print("Press 'q' to quit\n")
+    
+    # Start ffmpeg process
+    process = create_ffmpeg_process()
+    
+    # Calculate frame size
+    frame_size = get_frame_size(process, WIDTH, HEIGHT)
+    
+    # Frame counter for FPS calculation
+    frame_count = 0
+    start_time = time.time()
+    
     try:
         while True:
-            t0 = time.time()
-            frame = await ring.get_latest()
-            if frame is not None:
-                # Example processing: convert to grayscale (replace with your processing)
-                processed = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                # show processed (convert back to BGR for imshow)
-                show = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-                cv2.imshow("Async MJPEG - processed", show)
-            else:
-                # nothing yet; show a blank screen or wait
-                black = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
-                cv2.imshow("Async MJPEG - processed", black)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC
+            # Read raw frame data from pipe
+            raw_frame = process.stdout.read(frame_size)
+            
+            # Check if we got a complete frame
+            if len(raw_frame) != frame_size:
+                print(f"Warning: Incomplete frame received ({len(raw_frame)} bytes)")
+                # Try to restart the process if stream ends
+                if len(raw_frame) == 0:
+                    print("Stream ended or connection lost. Attempting to reconnect...")
+                    process.kill()
+                    time.sleep(2)
+                    process = create_ffmpeg_process()
+                    continue
+                else:
+                    continue
+            
+            # Convert raw bytes to numpy array
+            frame = np.frombuffer(raw_frame, dtype=np.uint8)
+            frame = frame.reshape((HEIGHT, WIDTH, 3))
+            
+            # ---------------------------------------------------
+            # YOUR PROCESSING CODE HERE
+            # Example: Add FPS counter
+            frame_count += 1
+            elapsed = time.time() - start_time
+            fps = frame_count / elapsed if elapsed > 0 else 0
+            
+            cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # Example: Convert to grayscale (commented out)
+            # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # ---------------------------------------------------
+            
+            # Display the frame
+            cv2.imshow('M3U8 Stream', frame)
+            
+            # Check for quit
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
-            # sleep to maintain display rate, but keep responsive
-            dt = time.time() - t0
-            to_sleep = frame_interval - dt
-            if to_sleep > 0:
-                await asyncio.sleep(to_sleep)
-            else:
-                await asyncio.sleep(0)  # yield
+                
+    except KeyboardInterrupt:
+        print("\nStopping stream...")
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
-        reader_task.cancel()
-        proc.kill()
-        await proc.wait()
+        # Cleanup
+        process.kill()
         cv2.destroyAllWindows()
+        print("Stream stopped.")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        pass
+    main()
