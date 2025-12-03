@@ -15,9 +15,19 @@ ORIGIN = "https://players.media.verkeerscentrum.be"
 WIDTH = 854
 HEIGHT = 480
 
-# Target FPS for display (typical traffic cam framerate)
-TARGET_FPS = 25.0
-FRAME_DELAY = 1.0 / TARGET_FPS
+# Adaptive FPS configuration
+BASE_FPS = 15.0  # Lower than stream's typical 25fps to build buffer
+MAX_FPS = 20.0
+MIN_FPS = 12.0
+
+# Buffer thresholds
+BUFFER_LOW = 25
+BUFFER_OPTIMAL = 50
+BUFFER_HIGH = 100
+
+# Global frame queue for producer-consumer pattern
+frame_queue = deque(maxlen=120)
+stop_flag = threading.Event()
 
 def drain_stderr(pipe):
     """Continuously drain stderr so ffmpeg won't block on Windows."""
@@ -28,22 +38,23 @@ def drain_stderr(pipe):
             pass
 
 def create_ffmpeg_process():
+    """Create ffmpeg process with optimized Windows settings"""
     headers = f"Referer: {REFERER}\r\nOrigin: {ORIGIN}\r\n"
     command = [
         "ffmpeg",
         "-headers", headers,
         "-fflags", "nobuffer",
         "-flags", "low_delay",
-        "-analyzeduration", "1000000",  # Increase from 0
-        "-probesize", "1000000",        # Increase from 32
+        "-analyzeduration", "1000000",  # Increased for better stream detection
+        "-probesize", "1000000",        # Increased from 32
         "-i", M3U8_URL,
         "-vf", f"scale={WIDTH}:{HEIGHT}",
         "-fps_mode", "passthrough",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
+        "-bufsize", "3M",  # Add output buffer for smoother writes
         "-an",
         "-sn",
-        "-bufsize", "3M",  # Add output buffer
         "-"
     ]
     process = subprocess.Popen(
@@ -60,19 +71,29 @@ def get_frame_size(width=WIDTH, height=HEIGHT):
     """Calculate bytes per frame"""
     return width * height * 3  # 3 bytes per pixel for BGR
 
-# Global frame queue for producer-consumer pattern
-frame_queue = deque(maxlen=30)  # Buffer up to 30 frames (~1 second at 25fps)
-stop_flag = threading.Event()
+def get_adaptive_fps(buffer_size):
+    """Adjust FPS based on buffer fullness"""
+    if buffer_size < BUFFER_LOW:
+        return MIN_FPS  # Buffer low - slow down playback
+    elif buffer_size < BUFFER_OPTIMAL:
+        return BASE_FPS  # Building buffer
+    elif buffer_size > BUFFER_HIGH:
+        return MAX_FPS  # Buffer high - speed up to drain excess
+    else:
+        return BASE_FPS + 2  # Optimal range
 
 def frame_reader(process, frame_size):
     """Producer: Read frames from ffmpeg and put them in the queue"""
     buffer = b""
     frame_count = 0
     
+    # Read multiple frames at once for better Windows performance
+    CHUNK_SIZE = frame_size * 6  # Read 6 frames worth of data at a time
+    
     try:
         while not stop_flag.is_set():
-            # Read one frame's worth of data
-            chunk = process.stdout.read(frame_size)
+            # Read larger chunks to reduce Windows pipe overhead
+            chunk = process.stdout.read(CHUNK_SIZE)
             if not chunk:
                 print("Stream ended")
                 break
@@ -99,9 +120,9 @@ def frame_reader(process, frame_size):
         print(f"Reader thread stopped. Read {frame_count} frames.")
 
 def main():
-    print("Starting m3u8 stream...")
+    print("Starting m3u8 stream with adaptive FPS...")
     print(f"Stream URL: {M3U8_URL}")
-    print(f"Target FPS: {TARGET_FPS}")
+    print(f"Base FPS: {BASE_FPS} (Range: {MIN_FPS}-{MAX_FPS})")
     print("Press 'q' to quit\n")
     
     # Start ffmpeg process
@@ -119,22 +140,33 @@ def main():
     skip_count = 0
     start_time = time.time()
     next_frame_time = time.time()
+    current_fps = BASE_FPS
+    last_fps_update = 0
     
     try:
-        print("Waiting for frames...")
+        print("Waiting for initial buffer...")
         
         # Wait for initial buffer
         while len(frame_queue) < 5 and not stop_flag.is_set():
             time.sleep(0.1)
         
         print(f"Starting playback with {len(frame_queue)} frames buffered")
+        next_frame_time = time.time()
         
         while not stop_flag.is_set():
             current_time = time.time()
+            buffer_size = len(frame_queue)
+            
+            # Update FPS every 10 frames based on buffer status
+            if display_count - last_fps_update >= 10:
+                current_fps = get_adaptive_fps(buffer_size)
+                last_fps_update = display_count
+            
+            frame_delay = 1.0 / current_fps
             
             # Check if it's time to display the next frame
             if current_time >= next_frame_time:
-                if len(frame_queue) > 0:
+                if buffer_size > 0:
                     frame, frame_time = frame_queue.popleft()
                     display_count += 1
                     
@@ -144,21 +176,25 @@ def main():
                     # Calculate metrics
                     elapsed = current_time - start_time
                     display_fps = display_count / elapsed if elapsed > 0 else 0
-                    buffer_size = len(frame_queue)
                     
                     # Display stats
-                    cv2.putText(frame, f"FPS: {display_fps:.1f}", (10, 30), 
+                    cv2.putText(frame, f"Playback: {current_fps:.1f} fps", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Buffer: {buffer_size}", (10, 60), 
+                    cv2.putText(frame, f"Actual: {display_fps:.1f} fps", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, f"Buffer: {buffer_size}", (10, 90), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
-                    # Show warning if buffer is low or high
-                    if buffer_size < 3:
-                        cv2.putText(frame, "BUFFERING...", (10, 90), 
+                    # Show status indicators
+                    if buffer_size < BUFFER_LOW:
+                        cv2.putText(frame, "BUFFERING...", (10, 120), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    elif buffer_size > 25:
-                        cv2.putText(frame, "BUFFER HIGH", (10, 90), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    elif buffer_size > BUFFER_HIGH:
+                        cv2.putText(frame, "DRAINING", (10, 120), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 128, 0), 2)
+                    else:
+                        cv2.putText(frame, "OPTIMAL", (10, 120), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
                     # Example: Convert to grayscale (commented out)
                     # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -169,23 +205,28 @@ def main():
                     # Display the frame
                     cv2.imshow('M3U8 Stream', frame)
                     
-                    # Schedule next frame
-                    next_frame_time += FRAME_DELAY
+                    # Schedule next frame with adaptive delay
+                    next_frame_time += frame_delay
                     
                     # If we're too far behind, reset timing
-                    if next_frame_time < current_time - FRAME_DELAY:
-                        next_frame_time = current_time + FRAME_DELAY
+                    if next_frame_time < current_time - frame_delay:
+                        next_frame_time = current_time + frame_delay
                         skip_count += 1
-                else:
-                    # No frames available, wait a bit
-                    time.sleep(0.001)
+                        
+                elif buffer_size == 0:
+                    # Buffer empty - pause and rebuild
+                    print("Buffer empty, pausing to rebuild...")
+                    while len(frame_queue) < 8 and not stop_flag.is_set():
+                        time.sleep(0.05)
+                    next_frame_time = time.time()  # Reset timing after pause
+                    print(f"Resuming with {len(frame_queue)} frames")
             else:
                 # Sleep until next frame time
                 sleep_time = next_frame_time - current_time
                 if sleep_time > 0:
-                    time.sleep(min(sleep_time, 0.001))
+                    time.sleep(min(sleep_time, 0.005))
             
-            # Check for quit
+            # Check for quit (minimal wait to not block frame display)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("Quit requested by user")
                 break
