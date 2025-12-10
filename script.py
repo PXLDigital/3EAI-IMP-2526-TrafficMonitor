@@ -18,15 +18,21 @@ class TrafficMonitor:
         self.cap = cv2.VideoCapture(video_source)
         
         # Background subtractor for motion detection
-        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+        self.bg_mog2 = cv2.createBackgroundSubtractorMOG2(
             history=500, 
-            varThreshold=50, 
+            varThreshold=50,
+            detectShadows=True
+        )
+
+        self.bg_knn = cv2.createBackgroundSubtractorKNN(
+            history=500,
+            dist2Threshold=400,
             detectShadows=True
         )
         
         # Minimum area for vehicle detection (adjust based on your camera distance)
-        self.min_area = 30
-        self.max_area = 5000
+        self.min_area = 100
+        self.max_area = 2500
         
         # Traffic density thresholds
         self.low_traffic = 1
@@ -60,14 +66,24 @@ class TrafficMonitor:
     def detect_vehicles(self, frame):
         """Detect vehicles using background subtraction and contour detection"""
         
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+        # Apply  median blur to reduce noise  (best out the tests)
+        blurred = cv2.medianBlur(frame, 5)
         
-        # Apply background subtraction
-        fg_mask = self.bg_subtractor.apply(blurred)
-        
+        # Apply background subtraction (combined, tests had noticed use both combnined is better performance)
+        fg_mog2 = self.bg_mog2.apply(blurred)
+        fg_knn = self.bg_knn.apply(blurred)
+
+
         # Remove shadows (they appear as gray in the mask)
-        _, fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
+        _, fg_mog2 = cv2.threshold(fg_mog2, 200, 255, cv2.THRESH_BINARY)
+        _, fg_knn = cv2.threshold(fg_knn, 200, 255, cv2.THRESH_BINARY)
+
+        # combine these 2 methods 
+        fg_mask = cv2.addWeighted(fg_mog2, 0.6, fg_knn, 0.4, 0)
+        # fg_mask = self.bg_subtractor.apply(blurred)
+        
+       
+       #  _, fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
         
         # Morphological operations to remove noise and fill gaps
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
