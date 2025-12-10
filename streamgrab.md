@@ -104,7 +104,91 @@ Overall, including a scaling step ensures stable frame sizes, reduces processing
 
 ## (Windows) adaptive FPS
 
+The built in buffers from windows aren't good, even after trying to force a framerate in ffmpeg, windows pipes were unable to keep up with the stream of data. Therefor a custom system had to be made that would just accept every data that would be comming through the windows pipe and keep track of how many frames have arrived. The program would then try to play the stream at a stable FPS, slowing down when it sees that there aren't many frames left in the buffer and speeding up when it sees that the buffer is getting full and frames will have to get dropped. This results in the stream being played back at 3 different speeds which can look very odd. For windows this does seem to be the quickest fix for the issue at hand. 
+
+This does introduce a seperate thread that is responsible for populating this buffer with frames received from ffmpeg. Tweaking the framerates of these 3 playback speeds can yield better results, finding the optimal framerates for playback. There is still an issue where poor network connection can destabilize this system but the buffering paramets should ensure this time is at an absolute minimum.
+
+```python
+def get_adaptive_fps(buffer_size):
+    """Adjust FPS based on buffer fullness"""
+    if buffer_size < BUFFER_LOW:
+        return MIN_FPS  # Buffer low - slow down playback
+    elif buffer_size < BUFFER_OPTIMAL:
+        return BASE_FPS  # Building buffer
+    elif buffer_size > BUFFER_HIGH:
+        return MAX_FPS  # Buffer high - speed up to drain excess
+    else:
+        return BASE_FPS + 2  # Optimal rangeopped. Read {frame_count} frames.")
+```
+
 ## (Windows) frame buffering & flushing
+
+This was the hardest to implement since it is a tweaking dance in order to get it right. Manual buffers have to be managed to be filled and emptied in a dynamic way which collaborates with the adaptive FPS methods to maintain a stable as possible framerate.
+
+The buffering and flushing logic exists to compensate for the way data arrives from FFmpeg. Because the stream is being read as raw bytes, the pipe does not align its reads to exact frame boundaries. A single `stdout.read()` call may return part of a frame, multiple frames, or even an uneven slice that spans across frame edges. The internal `buffer` variable acts as a temporary holding area so that incomplete data can accumulate until there is enough to assemble a full frame. Once a complete frame’s worth of bytes (`frame_size`) is available, it is extracted and processed while the leftover bytes remain in the buffer to be combined with the next chunk read from the pipe.
+
+Reading data in larger chunks also helps reduce overhead on platforms like Windows, where many small pipe reads can become a bottleneck. By using `CHUNK_SIZE = frame_size * 6`, the code retrieves multiple frames’ worth of data in one read operation, which smooths out I/O performance and prevents the decoder from starving the processing loop.
+
+The queue serves as a lightweight frame buffer between the reader thread and the display/processing loop. Frames are timestamped on arrival, allowing you to track latency or implement adaptive playback logic. If the queue grows too large, older frames can be dropped to avoid latency buildup. This is important because real-time processing favors fresher frames over perfect completeness.
+
+In situations where frames arrive faster than they can be displayed, the queue naturally grows. Conversely, if the stream experiences network delays or slow segment delivery, the queue shrinks. The system uses adaptive FPS control to react to buffer size fluctuations. This helps prevent visual stuttering and gives the main loop time to catch up or slow down accordingly.
+
+This approach of buffering, chunked reading, and controlled flushing ensures that even though the incoming data is a continuous byte stream with no frame boundaries, the system can reliably reconstruct exact frames, maintain smooth playback, and avoid blocking the pipeline. The separation between the reader thread and the main loop also prevents decoding hiccups from affecting display timing.
+
+```python
+def frame_reader(process, frame_size):
+    """Producer: Read frames from ffmpeg and put them in the queue"""
+    buffer = b""
+    frame_count = 0
+    
+    # Read multiple frames at once for better Windows performance
+    CHUNK_SIZE = frame_size * 6  # Read 6 frames worth of data at a time
+    
+    try:
+        while not stop_flag.is_set():
+            # Read larger chunks to reduce Windows pipe overhead
+            chunk = process.stdout.read(CHUNK_SIZE)
+            if not chunk:
+                print("Stream ended")
+                break
+            
+            buffer += chunk
+            
+            # Process complete frames
+            while len(buffer) >= frame_size:
+                raw_frame = buffer[:frame_size]
+                buffer = buffer[frame_size:]
+                
+                # Convert to numpy array
+                frame = np.frombuffer(raw_frame, dtype=np.uint8).copy()
+                frame = frame.reshape((HEIGHT, WIDTH, 3))
+                
+                # Add to queue (will drop oldest if full)
+                frame_queue.append((frame, time.time()))
+                frame_count += 1
+                
+    except Exception as e:
+        print(f"Reader error: {e}")
+    finally:
+        stop_flag.set()
+        print(f"Reader thread st
+```
+
+## (Windows) Cleaning stderr
+
+Windows also has a quirk where it will block other standard streams if one of them is congested. If you do not clean the stderr stream it can pile up until the stdout stream is congested and it will halt python processing. While there is a system in place to clean this up, this method introduces lag spikes which is unwanted behaviour when aiming for a smooth stream. 
+
+After creating the ffmpeg stream another thread is started who's job it is to clean the stderr steam
+
+```python
+def drain_stderr(pipe):
+    """Continuously drain stderr so ffmpeg won't block on Windows."""
+    for line in iter(pipe.readline, b''):
+        try:
+            sys.stderr.write(line.decode(errors="replace"))
+        except:
+            pass
+```
 
 ## OpenCV format conversion
 
