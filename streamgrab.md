@@ -17,15 +17,25 @@ FFMpeg is a swiss army knife of multimedia, it is the silent powertrain behind m
 After having chosen FFMpeg, one thing still remained. FFMpeg needs the right flags set to build the pipeline. Here the general idea is the same and both linux and windows share the same flags. FFMpeg is a program that runs for the command line, it is configured using command line flags. 
 
 `ffmpeg` execute ffmpeg
+
 `-headers headers` passthrough of the HTTP headers used to circumvent protection (see below)
+
 `-fflags nobuffer` Prevent ffmpeg from building a buffer in order to reduce latency, buffering can be handled internally by python
+
 `-flags low_delay` Reduce latency even further by eliminating redundant steps inside the ffmpeg pipeline
+
 `-i M3U8_URL` link to the m3u8 chunklist
+
 `-vf "scale={WIDTH}:{HEIGHT}"` resizing filter (see below)
+
 `-f rawvideo` output format set to raw, could've gone with a compressed format to improve pipeline performance but this would then tradeoff performance somehwere else because it introduces a redundant encoding and decoding step.
+
 `-pix_fmt bgr24` format of the rawvideo data, openCV can read multiple formats, including bgr24 and the standard pixel format for your incomming stream is bgr24. Therefor bgr24 was only logical because this way extra processing isn't needed.
+
 `-an` No audio, just to be safe
+
 `-sn` No subtitles, just to be safe
+
 `-` Output to the standard inout so that python can read the stream
 
 
@@ -35,17 +45,25 @@ There are also some differences between the two. Mainly options regaring timing 
 ### Windows
 
 `-analyzeduration 1000000` Sets how long FFmpeg should analyze the input stream to detect codecs, streams, and formats. The value could be decreased but this value made sure the stream would load reliably
+
 `-probesize 1000000` Increases how much data (in bytes) FFmpeg can probe before determining stream information. Increasing this helps FFmpeg correctly detect formats when headers are incomplete or streams start with noise. In the case of windows this was needed because it sometimes stuggled to reliably start the stream
+
 `-fps_mode passthrough` Instructs FFmpeg to preserve the source frame rate as-is. No frame duplication or dropping is performed this was needed to implement a custom buffering system since the default resulted in very laggy streams.
+
 `-bufsize 3M` This setting is a bit strange since a nobuffer flag was provided, this did however solve an issue where the custom buffering system would take very long to restabilize after getting a longer period of poor connection. The flag sets the encoder's rate-control buffer size.
 
 ### Linux
 
 `-strict experimental` Allows the use of experimental or non-fully-standardized codec features. Required for certain codecs or profiles that FFmpeg considers unstable or still in development. This was used to perform comparisons between different codecs and file formats to find the best possible settings on linux. These settings where then used on windows too with some extra tweaks to fix the platform quirks.
+
 `-analyzeduration 0` Linux had no issues with unreliable startup of the stream. This flag disables stream analysis time. This speeds up startup but risks incorrect stream detection if the input isn’t well-structured.
+
 `-probesize 32` The linux version did not have issues with unreliable stream startup, reducing the provesize improved stream performance without sacrificing reliability
+
 `-vsync 0` Disables video synchronization this way FFmpeg outputs frames exactly as they come without duplicating or dropping. We use it to achieve strict frame-for-frame matching which improves speed for openCV. 
+
 `-copytb 0` Controls how timestamps are copied from the input. With `0`, FFmpeg generates new timestamps rather than copying input timebase values, in our case giving cleaner or more consistent output timing.
+
 `-r 25` Forces the output frame rate to 25 fps. FFmpeg will duplicate or drop frames as needed to match this exact rate. Combined with the other setting this game a very smooth experience to perform image processing on.
 
 ## Circumventing protection
