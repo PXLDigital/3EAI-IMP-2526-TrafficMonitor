@@ -68,9 +68,39 @@ There are also some differences between the two. Mainly options regaring timing 
 
 ## Circumventing protection
 
+A lot of streaming sites want their streaming server to only be utilized by users using a browser. An automated system like this is generally unwanted. A lot of sites implement a very rudamentary check to see who is requesting the resource. It simply checks the refferer and sometimes origin of the request to see if it comes from their own site. There are other more complex methods but many sites implement this basic condition check before serving content.
+
+Of course this poses an issue for our programming. If we try to play a HLS stream without circumventing the protection you will get something like this
+
+![](media/No_Header_Error.JPG)
+
+That is also one of the reasons we use ffmpeg, it is easy to pass custom HTTP headers, looking at the traffic camera we are using we can use developper tools to see what headers it expects. We simply copy that and put it in our python script. After that we can see that the video stream gets received.
+
+![](media/correct_function_of_players.JPG)
+
 ## Stream Format conversion
 
+This was briefly discussed already when breaking down the ffmpeg command, there are however a lot more options that were considered before settling on the current formats.
+
+Rawvideo and bgr24 were chosen because they eliminate unnecessary decoding steps in Python. Rawvideo outputs uncompressed pixel data, meaning every frame arrives as a fixed-size block of bytes. This avoids having to decode video again in OpenCV or use a container format. It also guarantees predictable frame size (width × height × 3), which makes converting the incoming byte stream into a NumPy array straightforward.
+
+bgr24 is used because OpenCV internally uses BGR byte ordering. If the output were RGB or YUV, OpenCV would need either a channel swap or a full color-space conversion. bgr24 directly matches what OpenCV expects, so it removes another unnecessary processing step.
+
+HLS streams work by listing short MPEG-TS (.ts) video segments inside a .m3u8 chunklist. FFmpeg downloads these segments sequentially. Because MPEG-TS often contains H.264 with P-frames and B-frames, the decoder typically buffers frames for reordering. The flags used in the command are chosen to reduce both buffering and probing to bring latency down as much as possible.
+
+Overall, rawvideo + bgr24 is the most direct and latency-minimal way to get decoded frames from FFmpeg into OpenCV. It maximizes performance at the cost of higher bandwidth between FFmpeg and the Python process, which is usually acceptable for local interprocess communication.
+
 ## Scaling
+
+The scaling step is included to ensure that every frame delivered to OpenCV has a consistent and predictable resolution. HLS sources can vary in quality depending on network conditions or the variant playlist being served. By forcing a fixed width and height, the processing pipeline avoids situations where frames suddenly change size, which would break downstream algorithms that assume a stable input shape. Consistent dimensions also simplify buffer handling, since rawvideo output depends entirely on knowing the exact number of bytes per frame.
+
+Another practical reason for scaling is performance. High-resolution HLS streams can be expensive to process in real time, especially if each frame is used for computer vision tasks like detection or tracking. Downscaling to a more manageable resolution reduces the computational load while still retaining enough detail for analysis. In many cases, a slightly lower resolution provides a good balance between clarity and speed.
+
+The scaling step also allows you to define a resolution that matches the needs of the system rather than the source. Cameras may output at 1080p or higher, but your model or algorithm might be designed for 720p or a custom dimension. Performing the scaling in FFmpeg takes advantage of FFmpeg’s optimized pixel operations, which are faster and more reliable than resizing frames later inside Python.
+
+The specific dimensions aren't important we opted for the user to be able to decide themselves what width and height they want to use.
+
+Overall, including a scaling step ensures stable frame sizes, reduces processing overhead, and aligns the incoming stream with the requirements of the computer vision pipeline.
 
 ## (Windows) adaptive FPS
 
