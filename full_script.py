@@ -4,7 +4,7 @@ import numpy as np
 import time
 
 # Stream configuration
-M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_L2027_A2_PARK_MIDDEN_LIMBURG_22.3_PTZ.stream/chunklist.m3u8"
+M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8"
 REFERER = "https://players.media.verkeerscentrum.be/"
 ORIGIN = "https://players.media.verkeerscentrum.be"
 
