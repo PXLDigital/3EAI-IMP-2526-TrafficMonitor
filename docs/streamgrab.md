@@ -38,8 +38,6 @@ After having chosen FFMpeg, one thing still remained. FFMpeg needs the right fla
 
 `-` Output to the standard inout so that python can read the stream
 
-
-
 There are also some differences between the two. Mainly options regaring timing and buffering, the following flags are added. 
 
 ### Windows
@@ -140,10 +138,10 @@ def frame_reader(process, frame_size):
     """Producer: Read frames from ffmpeg and put them in the queue"""
     buffer = b""
     frame_count = 0
-    
+
     # Read multiple frames at once for better Windows performance
     CHUNK_SIZE = frame_size * 6  # Read 6 frames worth of data at a time
-    
+
     try:
         while not stop_flag.is_set():
             # Read larger chunks to reduce Windows pipe overhead
@@ -151,22 +149,22 @@ def frame_reader(process, frame_size):
             if not chunk:
                 print("Stream ended")
                 break
-            
+
             buffer += chunk
-            
+
             # Process complete frames
             while len(buffer) >= frame_size:
                 raw_frame = buffer[:frame_size]
                 buffer = buffer[frame_size:]
-                
+
                 # Convert to numpy array
                 frame = np.frombuffer(raw_frame, dtype=np.uint8).copy()
                 frame = frame.reshape((HEIGHT, WIDTH, 3))
-                
+
                 # Add to queue (will drop oldest if full)
                 frame_queue.append((frame, time.time()))
                 frame_count += 1
-                
+
     except Exception as e:
         print(f"Reader error: {e}")
     finally:

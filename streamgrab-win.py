@@ -7,6 +7,29 @@ import sys
 from collections import deque
 from datetime import datetime
 
+# Stream configuration
+M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8"
+REFERER = "https://players.media.verkeerscentrum.be/"
+ORIGIN = "https://players.media.verkeerscentrum.be"
+
+# Frame dimensions
+WIDTH = 854
+HEIGHT = 480
+
+# Adaptive FPS configuration
+BASE_FPS = 15.0  # Lower than stream's typical 25fps to build buffer
+MAX_FPS = 20.0
+MIN_FPS = 12.0
+
+# Buffer thresholds
+BUFFER_LOW = 25
+BUFFER_OPTIMAL = 50
+BUFFER_HIGH = 100
+
+# Global frame queue for producer-consumer pattern
+frame_queue = deque(maxlen=120)
+stop_flag = threading.Event()
+
 # =============================================================
 #               TRAFFIC MONITOR CLASS                       
 # =============================================================
@@ -105,28 +128,7 @@ class TrafficMonitor:
 # =============================================================
 #                   STREAM + ADAPTIVE PLAYER
 # =============================================================
-# Stream configuration
-M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8"
-REFERER = "https://players.media.verkeerscentrum.be/"
-ORIGIN = "https://players.media.verkeerscentrum.be"
 
-# Frame dimensions
-WIDTH = 854
-HEIGHT = 480
-
-# Adaptive FPS configuration
-BASE_FPS = 15.0  # Lower than stream's typical 25fps to build buffer
-MAX_FPS = 20.0
-MIN_FPS = 12.0
-
-# Buffer thresholds
-BUFFER_LOW = 25
-BUFFER_OPTIMAL = 50
-BUFFER_HIGH = 100
-
-# Global frame queue for producer-consumer pattern
-frame_queue = deque(maxlen=120)
-stop_flag = threading.Event()
 
 def drain_stderr(pipe):
     """Continuously drain stderr so ffmpeg won't block on Windows."""
