@@ -5,7 +5,106 @@ import time
 import threading
 import sys
 from collections import deque
+from datetime import datetime
 
+# =============================================================
+#               TRAFFIC MONITOR CLASS                       
+# =============================================================
+class TrafficMonitor:
+    def __init__(self):
+        # No VideoCapture - frames come from FFmpeg
+        self.cap = None
+
+        # Background subtractors
+        self.bg_mog2 = cv2.createBackgroundSubtractorMOG2(
+            history=500,
+            varThreshold=50,
+            detectShadows=True
+        )
+
+        self.bg_knn = cv2.createBackgroundSubtractorKNN(
+            history=500,
+            dist2Threshold=400,
+            detectShadows=True
+        )
+
+        # Vehicle size thresholds (for 854x480)
+        self.min_area = 150
+        self.max_area = 3500
+
+        self.low_traffic = 10
+        self.medium_traffic = 15
+        self.high_traffic = 25
+
+        self.vehicle_count = 0
+
+    def detect_vehicles(self, frame):
+        """Detect vehicles using background subtraction & contour analysis"""
+
+        blurred = cv2.medianBlur(frame, 5)
+
+        fg_mog2 = self.bg_mog2.apply(blurred)
+        fg_knn = self.bg_knn.apply(blurred)
+
+        _, fg_mog2 = cv2.threshold(fg_mog2, 200, 255, cv2.THRESH_BINARY)
+        _, fg_knn = cv2.threshold(fg_knn, 200, 255, cv2.THRESH_BINARY)
+
+        fg_mask = cv2.addWeighted(fg_mog2, 0.6, fg_knn, 0.4, 0)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+
+        contours, _ = cv2.findContours(
+            fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        vehicles = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            if self.min_area < area < self.max_area:
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / float(h)
+                if 0.2 < aspect_ratio < 5.0:
+                    vehicles.append((x, y, w, h, area))
+
+        return vehicles, fg_mask
+
+    def get_traffic_status(self, vehicle_count):
+        if vehicle_count < self.low_traffic:
+            return "LOW", (0, 255, 0)
+        elif vehicle_count < self.medium_traffic:
+            return "MEDIUM", (0, 255, 255)
+        elif vehicle_count < self.high_traffic:
+            return "HIGH", (0, 165, 255)
+        else:
+            return "VERY HIGH", (0, 0, 255)
+
+    def draw_info(self, frame, vehicles):
+        self.vehicle_count = len(vehicles)
+
+        for (x, y, w, h, area) in vehicles:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, f"{int(area)}", (x, y-4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        status, color = self.get_traffic_status(self.vehicle_count)
+
+        cv2.putText(frame, f"Vehicles: {self.vehicle_count}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+        cv2.putText(frame, f"Traffic: {status}", (10, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), (10, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+
+        return frame
+    
+# =============================================================
+#                   STREAM + ADAPTIVE PLAYER
+# =============================================================
 # Stream configuration
 M3U8_URL = "https://hls.media.verkeerscentrum.be/WEB_K_O5027_A11_ZELZATETNL__103.7_A.stream/chunklist.m3u8"
 REFERER = "https://players.media.verkeerscentrum.be/"
@@ -124,7 +223,10 @@ def main():
     print(f"Stream URL: {M3U8_URL}")
     print(f"Base FPS: {BASE_FPS} (Range: {MIN_FPS}-{MAX_FPS})")
     print("Press 'q' to quit\n")
-    
+
+
+    monitor = TrafficMonitor()
+
     # Start ffmpeg process
     process = create_ffmpeg_process()
     
@@ -168,34 +270,17 @@ def main():
             if current_time >= next_frame_time:
                 if buffer_size > 0:
                     frame, frame_time = frame_queue.popleft()
-                    display_count += 1
+                    display_count += 1                   
                     
                     # ---------------------------------------------------
                     # YOUR PROCESSING CODE HERE
-                    
-                    # Calculate metrics
-                    elapsed = current_time - start_time
-                    display_fps = display_count / elapsed if elapsed > 0 else 0
-                    
-                    # Display stats
-                    cv2.putText(frame, f"Playback: {current_fps:.1f} fps", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Actual: {display_fps:.1f} fps", (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Buffer: {buffer_size}", (10, 90), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    # Show status indicators
-                    if buffer_size < BUFFER_LOW:
-                        cv2.putText(frame, "BUFFERING...", (10, 120), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    elif buffer_size > BUFFER_HIGH:
-                        cv2.putText(frame, "DRAINING", (10, 120), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 128, 0), 2)
-                    else:
-                        cv2.putText(frame, "OPTIMAL", (10, 120), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
+                    # =================================================
+                    #                TRAFFIC PROCESSING
+                    # =================================================
+                    vehicles, fg_mask = monitor.detect_vehicles(frame)
+                    frame = monitor.draw_info(frame, vehicles)
+                    # =================================================
+
                     # Example: Convert to grayscale (commented out)
                     # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     # cv2.imshow('Grayscale', gray)
