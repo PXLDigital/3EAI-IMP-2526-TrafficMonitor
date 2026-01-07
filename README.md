@@ -26,6 +26,10 @@ After these variables are changed you can save and close the script
 
 Depending on your OS you can run either streamgrab.py using `python screengrab.py` if you are on linux or `python screengrab-win.py` if you are on windows. 
 
+For the image processing you need to run `python complete_script.py`
+
+
+
 The two version behave slightly different since linux has better pipelines. Windows needs extra settings to properly buffer and pipe video.
 
 ## Documentation
